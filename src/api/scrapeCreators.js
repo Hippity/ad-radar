@@ -38,7 +38,14 @@ export class ScrapeCreatorsClient {
       }
     });
 
-    const response = await this.fetchImpl(`${API_BASE}${path}?${query.toString()}`, {
+    const url = `${API_BASE}${path}?${query.toString()}`;
+    console.info("[ScrapeCreators] Request", {
+      path,
+      url,
+      params,
+    });
+
+    const response = await this.fetchImpl(url, {
       headers: {
         "x-api-key": this.apiKey,
         "Content-Type": "application/json",
@@ -50,10 +57,19 @@ export class ScrapeCreatorsClient {
     }
 
     if (!response.ok) {
+      console.error("[ScrapeCreators] Request failed", {
+        path,
+        status: response.status,
+      });
       throw new Error(`ScrapeCreators error ${response.status}`);
     }
 
-    return response.json();
+    const payload = await response.json();
+    console.info("[ScrapeCreators] Response", {
+      path,
+      success: payload?.success,
+    });
+    return payload;
   }
 
   async getFacebookCompanyAds({ companyName, startDate, endDate, country = "ALL" }) {
@@ -66,13 +82,16 @@ export class ScrapeCreatorsClient {
     });
   }
 
-  async getGoogleCompanyAds({ domain, startDate, endDate }) {
+  async getGoogleCompanyAds({ domain, startDate, endDate, region, cursor, advertiserId }) {
     return this.request("/v1/google/company/ads", {
       domain,
+      advertiser_id: advertiserId,
       topic: "all",
+      region: region || undefined,
       start_date: startDate,
       end_date: endDate,
       get_ad_details: "false",
+      cursor,
     });
   }
 
@@ -97,17 +116,17 @@ export class ScrapeCreatorsClient {
     return this.facebookAdsCache.get(cacheKey);
   }
 
-  async getGoogleAdsForCompetitor(competitor, startDate, endDate) {
+  async getGoogleAdsForCompetitor(competitor, startDate, endDate, region) {
     const domain = normalizeDomain(competitor.website);
     if (!domain) {
       return { ads: [] };
     }
 
-    const cacheKey = `${domain}|${startDate}|${endDate}`;
+    const cacheKey = `${domain}|${startDate}|${endDate}|${region || "ANY"}`;
     if (!this.googleAdsCache.has(cacheKey)) {
       this.googleAdsCache.set(
         cacheKey,
-        this.getGoogleCompanyAds({ domain, startDate, endDate }).catch((error) => {
+        this.getGoogleCompanyAds({ domain, startDate, endDate, region }).catch((error) => {
           this.googleAdsCache.delete(cacheKey);
           if (error instanceof TypeError) {
             throw new Error("Network/CORS error while calling ScrapeCreators");

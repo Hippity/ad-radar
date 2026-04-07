@@ -43,6 +43,10 @@ export default function SetupDialog({
   setMetaCountryMode,
   metaCountriesInput,
   setMetaCountriesInput,
+  googleRegionMode,
+  setGoogleRegionMode,
+  googleRegionsInput,
+  setGoogleRegionsInput,
   startDate,
   setStartDate,
   endDate,
@@ -153,6 +157,35 @@ export default function SetupDialog({
           </div>
           <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
             ScrapeCreators only accepts one Meta `country` per request, so specific countries are fetched one by one.
+          </div>
+        </Section>
+
+        <Section title="Google Regions">
+          <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 12, alignItems: "start" }}>
+            <div>
+              <Label>Mode</Label>
+              <select
+                style={inputStyle}
+                value={googleRegionMode}
+                onChange={(event) => setGoogleRegionMode(event.target.value)}
+              >
+                <option value="all">Anywhere</option>
+                <option value="selected">Specific regions</option>
+              </select>
+            </div>
+            <div>
+              <Label>Regions <Hint>(comma-separated 2-letter codes)</Hint></Label>
+              <input
+                style={inputStyle}
+                placeholder="US, GB, LB"
+                value={googleRegionsInput}
+                onChange={(event) => setGoogleRegionsInput(event.target.value.toUpperCase())}
+                disabled={googleRegionMode !== "selected"}
+              />
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
+            Google company ads use the `region` query parameter. Specific regions are fetched one by one.
           </div>
         </Section>
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ScrapeCreatorsClient } from "./api/scrapeCreators";
 import SetupDialog from "./components/SetupDialog";
 import {
@@ -34,6 +34,18 @@ function formatDateTime(value) {
   if (!value) return "—";
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
+}
+
+function toTime(value) {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function startOfDayUtc(dateString) {
+  if (!dateString) return 0;
+  const parsed = new Date(`${dateString}T00:00:00.000Z`).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
 }
 
 function getMetaPlacements(ad) {
@@ -139,37 +151,90 @@ function summarizeMetaAds(payload) {
   };
 }
 
-function summarizeGoogleAds(payload) {
+function getGoogleAdKey(ad) {
+  return ad.creativeId || ad.creative_id || ad.adUrl || ad.url || `${ad.advertiserId || ad.advertiser_id || "google"}-${ad.firstShown || ad.lastShown || "ad"}`;
+}
+
+function getGoogleStatusFromLastShown(lastShown, selectedEndDate) {
+  const lastShownTime = toTime(lastShown);
+  const selectedEndStart = startOfDayUtc(selectedEndDate);
+
+  if (!lastShownTime || !selectedEndStart) {
+    return "UNKNOWN";
+  }
+
+  return lastShownTime >= selectedEndStart ? "ACTIVE" : "INACTIVE";
+}
+
+function summarizeGoogleAds(payload, selectedEndDate) {
   const ads = payload?.ads || payload?.results || [];
-  const formats = new Set();
+  const formatCounts = new Map();
+  const advertiserCounts = new Map();
+  let earliestShownValue = 0;
+  let latestShownValue = 0;
+  let activeCount = 0;
+  let inactiveCount = 0;
 
-  const previewAds = ads.slice(0, 8).map((ad) => {
+  ads.forEach((ad) => {
     const format = (ad.format || "unknown").toString().toUpperCase();
-    formats.add(format);
+    formatCounts.set(format, (formatCounts.get(format) || 0) + 1);
 
-    return {
-      id: ad.creativeId || ad.creative_id || ad.adUrl,
-      advertiserName: ad.advertiserName || ad.advertiser_name || "Unknown advertiser",
-      format,
-      domain: ad.domain || "—",
-      url: ad.adUrl || ad.url || "",
-      firstShown: formatDateTime(ad.firstShown || ad.first_shown),
-      lastShown: formatDateTime(ad.lastShown || ad.last_shown),
-    };
+    const advertiserName = ad.advertiserName || ad.advertiser_name || "Unknown advertiser";
+    advertiserCounts.set(advertiserName, (advertiserCounts.get(advertiserName) || 0) + 1);
+
+    const firstShownValue = toTime(ad.firstShown || ad.first_shown);
+    const lastShownValue = toTime(ad.lastShown || ad.last_shown);
+
+    if (!earliestShownValue || (firstShownValue && firstShownValue < earliestShownValue)) {
+      earliestShownValue = firstShownValue;
+    }
+
+    if (lastShownValue > latestShownValue) {
+      latestShownValue = lastShownValue;
+    }
+
+    const status = getGoogleStatusFromLastShown(ad.lastShown || ad.last_shown, selectedEndDate);
+    if (status === "ACTIVE") activeCount += 1;
+    if (status === "INACTIVE") inactiveCount += 1;
   });
 
-  const latestAd = [...ads].sort((left, right) => {
-    const leftTime = new Date(left.lastShown || left.last_shown || 0).getTime();
-    const rightTime = new Date(right.lastShown || right.last_shown || 0).getTime();
-    return rightTime - leftTime;
-  })[0];
+  const formatBreakdown = [...formatCounts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+
+  const advertiserBreakdown = [...advertiserCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
+
+  const previewAds = ads.slice(0, 12).map((ad) => ({
+    id: getGoogleAdKey(ad),
+    advertiserId: ad.advertiserId || ad.advertiser_id || "—",
+    creativeId: ad.creativeId || ad.creative_id || "—",
+    advertiserName: ad.advertiserName || ad.advertiser_name || "Unknown advertiser",
+    format: (ad.format || "unknown").toString().toUpperCase(),
+    domain: ad.domain || "—",
+    url: ad.adUrl || ad.url || "",
+    imageUrl: ad.imageUrl || ad.image_url || "",
+    firstShown: formatDateTime(ad.firstShown || ad.first_shown),
+    lastShown: formatDateTime(ad.lastShown || ad.last_shown),
+    status: getGoogleStatusFromLastShown(ad.lastShown || ad.last_shown, selectedEndDate),
+  }));
 
   return {
     ads,
-    formats: [...formats],
     totalAds: ads.length,
-    latestShown: latestAd ? formatDateTime(latestAd.lastShown || latestAd.last_shown) : "—",
+    activeCount,
+    inactiveCount,
+    uniqueAdvertisers: advertiserBreakdown.length,
+    formats: formatBreakdown.map((entry) => entry.label),
+    formatBreakdown,
+    advertiserBreakdown,
+    firstShown: earliestShownValue ? formatDateTime(earliestShownValue) : "—",
+    latestShown: latestShownValue ? formatDateTime(latestShownValue) : "—",
     previewAds,
+    cursor: payload?.cursor || "",
+    hasMore: Boolean(payload?.cursor),
+    creditsRemaining: payload?.credits_remaining ?? null,
   };
 }
 
@@ -458,7 +523,100 @@ function MetaCompanyCard({ competitor, result, activeCountries }) {
   );
 }
 
-function GoogleCompanyCard({ competitor, result }) {
+function GoogleAdCard({ ad }) {
+  return (
+    <div
+      style={{
+        border: `1px solid ${C.border}`,
+        borderRadius: 16,
+        overflow: "hidden",
+        background: C.surface,
+      }}
+    >
+      <div
+        style={{
+          height: 180,
+          background: `linear-gradient(180deg, ${C.googleBg} 0%, ${C.bg} 100%)`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          position: "relative",
+        }}
+      >
+        {ad.imageUrl ? (
+          <img src={ad.imageUrl} alt={ad.advertiserName} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        ) : (
+          <div style={{ textAlign: "center", padding: 16 }}>
+            <div style={{ fontSize: 11, color: C.googleText, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+              Google Ad
+            </div>
+            <div style={{ marginTop: 8, fontSize: 26, fontWeight: 700, color: C.text }}>
+              {ad.format}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ padding: 14 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+          <span style={{
+            padding: "4px 8px",
+            borderRadius: 999,
+            background: C.googleBg,
+            color: C.googleText,
+            fontSize: 10,
+            fontWeight: 700,
+          }}>
+            {ad.format}
+          </span>
+          <span style={{
+            padding: "4px 8px",
+            borderRadius: 999,
+            background: ad.status === "ACTIVE" ? C.activeBg : C.inactiveBg,
+            color: ad.status === "ACTIVE" ? C.activeText : C.inactiveText,
+            fontSize: 10,
+            fontWeight: 700,
+          }}>
+            {ad.status}
+          </span>
+          <span style={{
+            padding: "4px 8px",
+            borderRadius: 999,
+            background: C.bg,
+            border: `1px solid ${C.border}`,
+            color: C.text,
+            fontSize: 10,
+          }}>
+            Creative {ad.creativeId}
+          </span>
+        </div>
+
+        <div style={{ fontSize: 14, fontWeight: 600 }}>{ad.advertiserName}</div>
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>{ad.domain}</div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12, fontSize: 11 }}>
+          <div><span style={{ color: C.muted }}>First shown:</span> {ad.firstShown}</div>
+          <div><span style={{ color: C.muted }}>Last shown:</span> {ad.lastShown}</div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8, fontSize: 11 }}>
+          <div><span style={{ color: C.muted }}>Advertiser ID:</span> {ad.advertiserId}</div>
+          <div><span style={{ color: C.muted }}>Library URL:</span> {ad.url ? "Available" : "Missing"}</div>
+        </div>
+
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12, alignItems: "center" }}>
+          {ad.url && (
+            <a href={ad.url} target="_blank" rel="noreferrer" style={{ color: C.googleText, fontSize: 11, display: "inline-block" }}>
+              Open ad library
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GoogleCompanyCard({ competitor, result, regionLabel, selectedEndDate }) {
   if (!result) return null;
 
   if (result.status === "loading") {
@@ -475,26 +633,31 @@ function GoogleCompanyCard({ competitor, result }) {
   }
 
   return (
-    <div style={{ border: `1px solid ${C.border}`, borderRadius: 18, background: C.surface }}>
-      <div style={{ padding: 18, borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
-        <div>
-          <div style={{ fontSize: 18, fontWeight: 600 }}>{competitor.name}</div>
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>
-            Domain: {competitor.website || "Missing website"}
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 18, overflow: "hidden", background: C.surface }}>
+      <div style={{ padding: 18, borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 600 }}>{competitor.name}</div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>
+              Domain: {competitor.website || "Missing website"}
+            </div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>
+              Region: {regionLabel}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <StatTile label="Ads" value={result.summary.totalAds} />
+            <StatTile label="Active" value={result.summary.activeCount} color={C.activeText} />
+            <StatTile label="Inactive" value={result.summary.inactiveCount} color={C.inactiveText} />
+            <StatTile label="Formats" value={result.summary.formats.length || "—"} color={C.googleText} />
+            <StatTile label="Latest Seen" value={result.summary.latestShown} color={C.googleText} />
           </div>
         </div>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <StatTile label="Ads" value={result.summary.totalAds} />
-          <StatTile label="Formats" value={result.summary.formats.length || "—"} color={C.googleText} />
-          <StatTile label="Latest Seen" value={result.summary.latestShown} color={C.googleText} />
-        </div>
-      </div>
 
-      <div style={{ padding: 18 }}>
-        {result.summary.formats.length > 0 && (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-            {result.summary.formats.map((format) => (
-              <span key={format} style={{
+        {result.summary.formatBreakdown.length > 0 && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+            {result.summary.formatBreakdown.map((entry) => (
+              <span key={entry.label} style={{
                 padding: "5px 9px",
                 borderRadius: 999,
                 fontSize: 11,
@@ -502,36 +665,53 @@ function GoogleCompanyCard({ competitor, result }) {
                 color: C.googleText,
                 border: `1px solid ${C.google}40`,
               }}>
-                {format}
+                {entry.label} · {entry.count}
               </span>
             ))}
           </div>
         )}
 
+        {result.summary.advertiserBreakdown.length > 0 && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            {result.summary.advertiserBreakdown.slice(0, 4).map((entry) => (
+              <span key={entry.name} style={{
+                padding: "5px 9px",
+                borderRadius: 999,
+                fontSize: 11,
+                background: C.bg,
+                color: C.text,
+                border: `1px solid ${C.border}`,
+              }}>
+                {entry.name} · {entry.count}
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 12, fontSize: 11 }}>
+          <div><span style={{ color: C.muted }}>First shown:</span> {result.summary.firstShown}</div>
+          <div><span style={{ color: C.muted }}>Latest shown:</span> {result.summary.latestShown}</div>
+          <div><span style={{ color: C.muted }}>Status logic:</span> active if `lastShown` falls on {selectedEndDate}</div>
+          {result.summary.creditsRemaining != null && (
+            <div><span style={{ color: C.muted }}>Credits remaining:</span> {result.summary.creditsRemaining}</div>
+          )}
+        </div>
+
+        {result.summary.hasMore && (
+          <div style={{ marginTop: 12, padding: 10, borderRadius: 12, background: C.bg, border: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 12, color: C.text }}>
+              ScrapeCreators returned a pagination cursor for this company. This screen currently renders the first page only so it does not silently consume extra credits.
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ padding: 18 }}>
         {result.summary.previewAds.length === 0 ? (
           <div style={{ color: C.muted, fontSize: 12 }}>No Google ads found for this date range.</div>
         ) : (
-          <div style={{ display: "grid", gap: 10 }}>
-            {result.summary.previewAds.map((ad) => (
-              <div key={ad.id} style={{ padding: 12, border: `1px solid ${C.border}`, borderRadius: 12, background: C.bg }}>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{ad.advertiserName}</div>
-                  <span style={{ color: C.googleText, fontSize: 11 }}>{ad.format}</span>
-                </div>
-                <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>{ad.domain}</div>
-                <div style={{ fontSize: 11, color: C.text, marginTop: 10 }}>
-                  First shown: {ad.firstShown}
-                </div>
-                <div style={{ fontSize: 11, color: C.text, marginTop: 4 }}>
-                  Last shown: {ad.lastShown}
-                </div>
-                {ad.url && (
-                  <a href={ad.url} target="_blank" rel="noreferrer" style={{ color: C.accent, fontSize: 11, display: "inline-block", marginTop: 10 }}>
-                    Open ad
-                  </a>
-                )}
-              </div>
-            ))}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+            {result.summary.previewAds.map((ad) => <GoogleAdCard key={ad.id} ad={ad} />)}
           </div>
         )}
       </div>
@@ -547,7 +727,11 @@ export default function App() {
   const [metaCountryMode, setMetaCountryMode] = useState("selected");
   const [metaCountriesInput, setMetaCountriesInput] = useState("CN, US, UK, LB");
   const [selectedMetaCountry, setSelectedMetaCountry] = useState("ALL");
+  const [googleRegionMode, setGoogleRegionMode] = useState("selected");
+  const [googleRegionsInput, setGoogleRegionsInput] = useState("US, UK, LB");
   const [selectedMetaCompetitorId, setSelectedMetaCompetitorId] = useState("");
+  const [selectedGoogleCompetitorId, setSelectedGoogleCompetitorId] = useState("");
+  const [selectedGoogleRegion, setSelectedGoogleRegion] = useState("ANY");
   const [showSetup, setShowSetup] = useState(false);
 
   const [metaResults, setMetaResults] = useState({});
@@ -559,6 +743,12 @@ export default function App() {
   const [metaLastRun, setMetaLastRun] = useState(null);
   const [googleLastRun, setGoogleLastRun] = useState(null);
 
+  const apiClientRef = useRef(new ScrapeCreatorsClient(scrapeCreatorsApiKey));
+  if (apiClientRef.current.apiKey !== scrapeCreatorsApiKey.trim()) {
+    apiClientRef.current = new ScrapeCreatorsClient(scrapeCreatorsApiKey);
+  }
+  const api = apiClientRef.current;
+
   const validCompetitors = competitors.filter((competitor) => competitor.name.trim());
   const parsedMetaCountries = [...new Set(
     metaCountriesInput
@@ -566,20 +756,38 @@ export default function App() {
       .map((value) => value.trim().toUpperCase())
       .filter((value) => /^[A-Z]{2}$/.test(value)),
   )];
+  const parsedGoogleRegions = [...new Set(
+    googleRegionsInput
+      .split(",")
+      .map((value) => value.trim().toUpperCase())
+      .filter((value) => /^[A-Z]{2}$/.test(value)),
+  )];
   const metaCountryOptions = metaCountryMode === "selected" && parsedMetaCountries.length > 0
     ? parsedMetaCountries
     : ["ALL"];
+  const googleRegionOptions = googleRegionMode === "selected" && parsedGoogleRegions.length > 0
+    ? parsedGoogleRegions
+    : ["ANY"];
   const activeMetaCountry = metaCountryOptions.includes(selectedMetaCountry)
     ? selectedMetaCountry
     : metaCountryOptions[0];
+  const activeGoogleRegion = googleRegionOptions.includes(selectedGoogleRegion)
+    ? selectedGoogleRegion
+    : googleRegionOptions[0];
   const metaResultKey = (competitorId, country) => `${competitorId}|${country}`;
+  const googleResultKey = (competitorId, region) => `${competitorId}|${region}`;
   const activeMetaCompetitor = validCompetitors.find((competitor) => String(competitor.id) === String(selectedMetaCompetitorId))
     || validCompetitors[0]
     || null;
+  const activeGoogleCompetitor = validCompetitors.find((competitor) => String(competitor.id) === String(selectedGoogleCompetitorId))
+    || validCompetitors[0]
+    || null;
+
   const getCompetitorActiveCountries = (competitorId) => metaCountryOptions.filter((country) => {
     const result = metaResults[metaResultKey(competitorId, country)];
     return (result?.summary?.activeCount || 0) > 0;
   });
+
   const getCompetitorTotalsAcrossCountries = (competitorId) => ({
     totalAds: metaCountryOptions.reduce(
       (sum, country) => sum + (metaResults[metaResultKey(competitorId, country)]?.summary?.totalAds || 0),
@@ -590,8 +798,26 @@ export default function App() {
       0,
     ),
   });
+  const getCompetitorActiveGoogleRegions = (competitorId) => googleRegionOptions.filter((region) => {
+    const result = googleResults[googleResultKey(competitorId, region)];
+    return (result?.summary?.activeCount || 0) > 0;
+  });
+  const getCompetitorGoogleTotalsAcrossRegions = (competitorId) => ({
+    totalAds: googleRegionOptions.reduce(
+      (sum, region) => sum + (googleResults[googleResultKey(competitorId, region)]?.summary?.totalAds || 0),
+      0,
+    ),
+    activeAds: googleRegionOptions.reduce(
+      (sum, region) => sum + (googleResults[googleResultKey(competitorId, region)]?.summary?.activeCount || 0),
+      0,
+    ),
+    inactiveAds: googleRegionOptions.reduce(
+      (sum, region) => sum + (googleResults[googleResultKey(competitorId, region)]?.summary?.inactiveCount || 0),
+      0,
+    ),
+  });
 
-  const validateInputs = () => {
+  const validateBaseInputs = () => {
     if (!scrapeCreatorsApiKey.trim()) {
       alert("Please add your ScrapeCreators API key in Settings first.");
       return false;
@@ -607,6 +833,14 @@ export default function App() {
       return false;
     }
 
+    return true;
+  };
+
+  const validateMetaInputs = () => {
+    if (!validateBaseInputs()) {
+      return false;
+    }
+
     if (metaCountryMode === "selected" && parsedMetaCountries.length === 0) {
       alert("Add at least one valid 2-letter Meta country code, for example QA, US, GB.");
       return false;
@@ -615,10 +849,28 @@ export default function App() {
     return true;
   };
 
-  const runMetaAds = async () => {
-    if (!validateInputs()) return;
+  const validateGoogleInputs = () => {
+    if (!validateBaseInputs()) {
+      return false;
+    }
 
-    const api = new ScrapeCreatorsClient(scrapeCreatorsApiKey);
+    if (googleRegionMode === "selected" && parsedGoogleRegions.length === 0) {
+      alert("Add at least one valid 2-letter Google region code, for example US, GB, LB.");
+      return false;
+    }
+
+    const hasAtLeastOneWebsite = validCompetitors.some((competitor) => competitor.website.trim());
+    if (!hasAtLeastOneWebsite) {
+      alert("Add at least one competitor website domain in Settings to query Google Ads.");
+      return false;
+    }
+
+    return true;
+  };
+
+  const runMetaAds = async () => {
+    if (!validateMetaInputs()) return;
+
     setMetaLoading(true);
     setMetaProgress(0);
 
@@ -663,41 +915,64 @@ export default function App() {
   };
 
   const runGoogleAds = async () => {
-    if (!validateInputs()) return;
+    if (!validateGoogleInputs()) return;
 
-    const api = new ScrapeCreatorsClient(scrapeCreatorsApiKey);
     setGoogleLoading(true);
     setGoogleProgress(0);
 
     const initial = {};
     validCompetitors.forEach((competitor) => {
-      initial[competitor.id] = { status: "loading" };
+      googleRegionOptions.forEach((region) => {
+        initial[googleResultKey(competitor.id, region)] = { status: "loading" };
+      });
     });
     setGoogleResults(initial);
 
     let completed = 0;
-    for (const competitor of validCompetitors) {
-      try {
-        const payload = await api.getGoogleAdsForCompetitor(competitor, startDate, endDate);
-        setGoogleResults((current) => ({
-          ...current,
-          [competitor.id]: {
-            status: "ready",
-            summary: summarizeGoogleAds(payload),
-          },
-        }));
-      } catch (error) {
-        setGoogleResults((current) => ({
-          ...current,
-          [competitor.id]: {
-            status: "error",
-            error: error.message,
-          },
-        }));
-      }
+    const total = validCompetitors.length * googleRegionOptions.length;
+    for (const region of googleRegionOptions) {
+      for (const competitor of validCompetitors) {
+        if (!competitor.website.trim()) {
+          setGoogleResults((current) => ({
+            ...current,
+            [googleResultKey(competitor.id, region)]: {
+              status: "error",
+              error: "Missing website domain. Add a website in Settings to call the Google Ads API.",
+            },
+          }));
 
-      completed += 1;
-      setGoogleProgress(Math.round((completed / validCompetitors.length) * 100));
+          completed += 1;
+          setGoogleProgress(Math.round((completed / total) * 100));
+          continue;
+        }
+
+        try {
+          const payload = await api.getGoogleAdsForCompetitor(
+            competitor,
+            startDate,
+            endDate,
+            region === "ANY" ? undefined : region,
+          );
+          setGoogleResults((current) => ({
+            ...current,
+            [googleResultKey(competitor.id, region)]: {
+              status: "ready",
+              summary: summarizeGoogleAds(payload, endDate),
+            },
+          }));
+        } catch (error) {
+          setGoogleResults((current) => ({
+            ...current,
+            [googleResultKey(competitor.id, region)]: {
+              status: "error",
+              error: error.message,
+            },
+          }));
+        }
+
+        completed += 1;
+        setGoogleProgress(Math.round((completed / total) * 100));
+      }
     }
 
     setGoogleLastRun(new Date());
@@ -712,8 +987,8 @@ export default function App() {
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: ${C.bg}; }
         ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
-        input, textarea { font-family: 'IBM Plex Mono', monospace !important; }
-        input:focus, textarea:focus { border-color: ${C.accent} !important; box-shadow: 0 0 0 3px ${C.accentGlow}; }
+        input, textarea, select, button { font-family: 'IBM Plex Mono', monospace !important; }
+        input:focus, textarea:focus, select:focus { border-color: ${C.accent} !important; box-shadow: 0 0 0 3px ${C.accentGlow}; }
         a { text-decoration: none; }
       `}</style>
 
@@ -735,7 +1010,6 @@ export default function App() {
           <StatTile label="Start Date" value={startDate} />
           <StatTile label="End Date" value={endDate} />
         </div>
-
       </div>
 
       <SectionShell
@@ -874,7 +1148,7 @@ export default function App() {
 
       <SectionShell
         title="Google Ads"
-        subtitle="Use the Google company ads endpoint and render advertiser, format mix, and latest-seen timing across the selected date range."
+        subtitle="Use the Google company ads endpoint with the documented `region` query param. Active status is inferred from `lastShown` because the API does not return a native active flag."
         action={(
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             {googleLastRun && <span style={{ fontSize: 11, color: C.muted }}>Last run: {googleLastRun.toLocaleString()}</span>}
@@ -884,13 +1158,148 @@ export default function App() {
           </div>
         )}
       >
-        {validCompetitors.length === 0 ? (
+        <div style={{ marginBottom: 22 }}>
+          <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+            Per Competitor Results
+          </div>
+          {validCompetitors.length > 0 ? (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <th style={{ textAlign: "left", padding: "10px 12px", color: C.muted, fontWeight: 500 }}>Competitor</th>
+                    <th style={{ textAlign: "left", padding: "10px 12px", color: C.muted, fontWeight: 500 }}>Active Regions</th>
+                    <th style={{ textAlign: "left", padding: "10px 12px", color: C.muted, fontWeight: 500 }}>Ads</th>
+                    <th style={{ textAlign: "left", padding: "10px 12px", color: C.muted, fontWeight: 500 }}>Active</th>
+                    <th style={{ textAlign: "left", padding: "10px 12px", color: C.muted, fontWeight: 500 }}>Inactive</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {validCompetitors.map((competitor) => {
+                    const activeRegions = getCompetitorActiveGoogleRegions(competitor.id);
+                    const totals = getCompetitorGoogleTotalsAcrossRegions(competitor.id);
+
+                    return (
+                      <tr key={competitor.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <td style={{ padding: "12px", color: C.text, fontWeight: 600 }}>{competitor.name}</td>
+                        <td style={{ padding: "12px" }}>
+                          {activeRegions.length > 0 ? (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {activeRegions.map((region) => (
+                                <span key={region} style={{
+                                  padding: "4px 8px",
+                                  borderRadius: 999,
+                                  fontSize: 10,
+                                  background: C.activeBg,
+                                  color: C.activeText,
+                                  border: `1px solid ${C.activeText}40`,
+                                }}>
+                                  {region === "ANY" ? "Anywhere" : region}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span style={{ color: C.muted }}>—</span>
+                          )}
+                        </td>
+                        <td style={{ padding: "12px", color: C.text }}>{totals.totalAds}</td>
+                        <td style={{ padding: "12px", color: C.activeText }}>{totals.activeAds}</td>
+                        <td style={{ padding: "12px", color: C.inactiveText }}>{totals.inactiveAds}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div style={{ color: C.muted, fontSize: 12 }}>No competitors configured yet.</div>
+          )}
+        </div>
+
+        {googleRegionOptions.length > 0 && (
+          <div style={{ marginBottom: 22 }}>
+            <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>
+              Regions Searching In
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {googleRegionOptions.map((region) => (
+                <span key={region} style={{
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  fontSize: 11,
+                  background: C.bg,
+                  color: C.googleText,
+                  border: `1px solid ${C.google}40`,
+                }}>
+                  {region === "ANY" ? "Anywhere" : region}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 18 }}>
+          <select
+            style={{ ...btnStyle("ghost"), minWidth: 180 }}
+            value={activeGoogleCompetitor?.id ?? ""}
+            onChange={(event) => setSelectedGoogleCompetitorId(event.target.value)}
+          >
+            {validCompetitors.map((competitor) => (
+              <option key={competitor.id} value={competitor.id}>{competitor.name}</option>
+            ))}
+          </select>
+        </div>
+
+        {activeGoogleCompetitor && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 12, marginBottom: 18 }}>
+            <StatTile
+              label="Ads"
+              value={getCompetitorGoogleTotalsAcrossRegions(activeGoogleCompetitor.id).totalAds}
+              color={C.googleText}
+            />
+            <StatTile
+              label="Active"
+              value={getCompetitorGoogleTotalsAcrossRegions(activeGoogleCompetitor.id).activeAds}
+              color={C.activeText}
+            />
+            <StatTile
+              label="Inactive"
+              value={getCompetitorGoogleTotalsAcrossRegions(activeGoogleCompetitor.id).inactiveAds}
+              color={C.inactiveText}
+            />
+            <StatTile
+              label="Regions"
+              value={googleRegionOptions.length || "—"}
+              color={C.googleText}
+            />
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 18 }}>
+          <select
+            style={{ ...btnStyle("ghost"), minWidth: 160 }}
+            value={activeGoogleRegion}
+            onChange={(event) => setSelectedGoogleRegion(event.target.value)}
+          >
+            {googleRegionOptions.map((region) => (
+              <option key={region} value={region}>
+                {region === "ANY" ? "Anywhere" : region}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {validCompetitors.length === 0 || !activeGoogleCompetitor ? (
           <div style={{ color: C.muted, fontSize: 12 }}>No competitors configured yet.</div>
         ) : (
           <div style={{ display: "grid", gap: 16 }}>
-            {validCompetitors.map((competitor) => (
-              <GoogleCompanyCard key={competitor.id} competitor={competitor} result={googleResults[competitor.id]} />
-            ))}
+            <GoogleCompanyCard
+              key={`${activeGoogleCompetitor.id}-${activeGoogleRegion}`}
+              competitor={activeGoogleCompetitor}
+              result={googleResults[googleResultKey(activeGoogleCompetitor.id, activeGoogleRegion)]}
+              regionLabel={activeGoogleRegion === "ANY" ? "Anywhere" : activeGoogleRegion}
+              selectedEndDate={endDate}
+            />
           </div>
         )}
       </SectionShell>
@@ -905,6 +1314,10 @@ export default function App() {
           setMetaCountryMode={setMetaCountryMode}
           metaCountriesInput={metaCountriesInput}
           setMetaCountriesInput={setMetaCountriesInput}
+          googleRegionMode={googleRegionMode}
+          setGoogleRegionMode={setGoogleRegionMode}
+          googleRegionsInput={googleRegionsInput}
+          setGoogleRegionsInput={setGoogleRegionsInput}
           startDate={startDate}
           setStartDate={setStartDate}
           endDate={endDate}
