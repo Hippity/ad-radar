@@ -13,6 +13,8 @@ function stripHtml(value) {
   return (value || "").replace(/<br\s*\/?>/gi, " ").replace(/\s+/g, " ").trim();
 }
 
+
+
 function getTextValue(value) {
   if (!value) return "";
   if (typeof value === "string") return value;
